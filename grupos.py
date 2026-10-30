@@ -1,270 +1,564 @@
+
 import sqlite3
+from pathlib import Path
+from contextlib import contextmanager
+
+# Caminho do banco de dados
+BANCO = Path(__file__).resolve().parent / "grupos.db"
 
 
+# ==========================================
+# CONEXAO COM O BANCO DE DADOS
+# ==========================================
+
+@contextmanager
 def conectar():
-    conexao = sqlite3.connect("grupos.db")
+    conexao = sqlite3.connect(BANCO)
+    conexao.row_factory = sqlite3.Row
     conexao.execute("PRAGMA foreign_keys = ON")
-    return conexao
 
-
-def criar_participante(nome):
-    conexao = conectar()
-    cursor = conexao.execute("INSERT INTO participante (nome) VALUES (?)", (nome,))
-    conexao.commit()
-    novo_id = cursor.lastrowid
-    conexao.close()
-    return novo_id
-
-
-def criar_grupo_principal(nome):
-    conexao = conectar()
-    cursor = conexao.execute("INSERT INTO grupo (nome) VALUES (?)", (nome,))
-    conexao.commit()
-    novo_id = cursor.lastrowid
-    conexao.close()
-    return novo_id
-
-
-def criar_subgrupo(nome, cor, grupo_pai_id):
-    conexao = conectar()
-    cursor = conexao.execute(
-        "INSERT INTO grupo (nome, cor, grupo_pai_id) VALUES (?, ?, ?)",
-        (nome, cor, grupo_pai_id),
-    )
-    conexao.commit()
-    novo_id = cursor.lastrowid
-    conexao.close()
-    return novo_id
-
-
-def entrar_no_grupo(participante_id, grupo_id):
-    conexao = conectar()
-
-    
-    linha = conexao.execute(
-        "SELECT grupo_pai_id FROM grupo WHERE id = ?", (grupo_id,)
-    ).fetchone()
-
-    if linha is None:
+    try:
+        yield conexao
+        conexao.commit()
+    except Exception:
+        conexao.rollback()
+        raise
+    finally:
         conexao.close()
-        print("Erro: esse grupo não existe.")
-        return False
-    grupo_pai_id = linha[0]
-
-    
-    if grupo_pai_id is not None:
-        esta_no_principal = conexao.execute(
-            "SELECT 1 FROM participacao WHERE participante_id = ? AND grupo_id = ?",
-            (participante_id, grupo_pai_id),
-        ).fetchone()
-
-        if esta_no_principal is None:
-            conexao.close()
-            print("Erro: precisa entrar no grupo principal primeiro.")
-            return False
-
-    
-    conexao.execute(
-        "INSERT OR IGNORE INTO participacao (participante_id, grupo_id) VALUES (?, ?)",
-        (participante_id, grupo_id),
-    )
-    conexao.commit()
-    conexao.close()
-    return True
 
 
-def sair_do_subgrupo(participante_id, grupo_id):
-    
-    conexao = conectar()
-    cursor = conexao.execute(
-        "DELETE FROM participacao WHERE participante_id = ? AND grupo_id = ?",
-        (participante_id, grupo_id),
-    )
-    conexao.commit()
-    removidos = cursor.rowcount
-    conexao.close()
-    return removidos > 0
+# ==========================================
+# CRIACAO DAS TABELAS
+# ==========================================
+
+def iniciar_banco():
+    with conectar() as con:
+
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS participante (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL
+        )
+        """)
+
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS grupo (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            cor TEXT,
+            grupo_pai_id INTEGER,
+            FOREIGN KEY (grupo_pai_id) REFERENCES grupo(id)
+        )
+        """)
+
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS participacao (
+            participante_id INTEGER NOT NULL,
+            grupo_id INTEGER NOT NULL,
+            PRIMARY KEY (participante_id, grupo_id),
+            FOREIGN KEY (participante_id)
+                REFERENCES participante(id),
+            FOREIGN KEY (grupo_id)
+                REFERENCES grupo(id)
+        )
+        """)
 
 
-def sair_de_tudo(participante_id):
-    
-    conexao = conectar()
-    cursor = conexao.execute(
-        "DELETE FROM participacao WHERE participante_id = ?",
-        (participante_id,),
-    )
-    conexao.commit()
-    removidos = cursor.rowcount
-    conexao.close()
-    return removidos
+# ==========================================
+# CRIAR GRUPO OU SUBGRUPO
+# ==========================================
+
+def criar_grupo(nome, cor=None, grupo_pai_id=None):
+
+    nome = nome.strip()
+
+    if not nome:
+        raise ValueError("O nome do grupo não pode ficar vazio.")
+
+    with conectar() as con:
+
+        if grupo_pai_id is not None:
+            pai = con.execute(
+                "SELECT id FROM grupo WHERE id = ?",
+                (grupo_pai_id,)
+            ).fetchone()
+
+            if pai is None:
+                raise ValueError("Grupo principal não encontrado.")
+
+            # Evita criar subgrupos dentro de outros subgrupos
+            nivel = con.execute(
+                "SELECT grupo_pai_id FROM grupo WHERE id = ?",
+                (grupo_pai_id,)
+            ).fetchone()
+
+            if nivel["grupo_pai_id"] is not None:
+                raise ValueError(
+                    "Não é permitido criar subgrupos dentro de subgrupos."
+                )
+
+        cursor = con.execute("""
+            INSERT INTO grupo (nome, cor, grupo_pai_id)
+            VALUES (?, ?, ?)
+        """, (nome, cor, grupo_pai_id))
+
+        return cursor.lastrowid
 
 
-def excluir_subgrupo(grupo_id):
-    
-    conexao = conectar()
-    conexao.execute("DELETE FROM participacao WHERE grupo_id = ?", (grupo_id,))
-    conexao.execute("DELETE FROM grupo WHERE id = ?", (grupo_id,))
-    conexao.commit()
-    conexao.close()
-
-
-def listar_membros(grupo_id):
-    conexao = conectar()
-    linhas = conexao.execute(
-        """
-        SELECT participante.nome
-        FROM participacao
-        JOIN participante ON participante.id = participacao.participante_id
-        WHERE participacao.grupo_id = ?
-        ORDER BY participante.id
-        """,
-        (grupo_id,),
-    ).fetchall()
-    conexao.close()
-    return [linha[0] for linha in linhas]
-
-
-def listar_projetos_do_participante(participante_id):
-    conexao = conectar()
-    linhas = conexao.execute(
-        """
-        SELECT grupo.nome, grupo.cor
-        FROM participacao
-        JOIN grupo ON grupo.id = participacao.grupo_id
-        WHERE participacao.participante_id = ?
-        ORDER BY grupo.id
-        """,
-        (participante_id,),
-    ).fetchall()
-    conexao.close()
-    return linhas
+# ==========================================
+# LISTAR GRUPOS E SUBGRUPOS
+# ==========================================
 
 def listar_grupos():
-    conexao = conectar()
-    linhas = conexao.execute(
-        "SELECT id, nome, cor, grupo_pai_id FROM grupo ORDER BY id"
-    ).fetchall()
-    conexao.close()
-    return linhas
 
+    with conectar() as con:
+
+        grupos = con.execute("""
+            SELECT id, nome, cor, grupo_pai_id
+            FROM grupo
+            ORDER BY grupo_pai_id, nome
+        """).fetchall()
+
+        if not grupos:
+            print("\nNenhum grupo cadastrado.")
+            return
+
+        principais = [
+            grupo for grupo in grupos
+            if grupo["grupo_pai_id"] is None
+        ]
+
+        print("\n========== GRUPOS CADASTRADOS ==========")
+
+        for grupo in principais:
+
+            cor = grupo["cor"] or "Não definida"
+
+            print(f"\n[{grupo['id']}] {grupo['nome']}")
+            print(f"    Cor: {cor}")
+
+            subgrupos = [
+                sub for sub in grupos
+                if sub["grupo_pai_id"] == grupo["id"]
+            ]
+
+            for sub in subgrupos:
+                cor_sub = sub["cor"] or "Não definida"
+
+                print(
+                    f"    └── [{sub['id']}] {sub['nome']} "
+                    f"(Cor: {cor_sub})"
+                )
+
+
+# ==========================================
+# EDITAR GRUPO
+# ==========================================
+
+def editar_grupo(grupo_id, novo_nome=None, nova_cor=None):
+
+    with conectar() as con:
+
+        grupo = con.execute(
+            "SELECT id FROM grupo WHERE id = ?",
+            (grupo_id,)
+        ).fetchone()
+
+        if grupo is None:
+            raise ValueError("Grupo não encontrado.")
+
+        if novo_nome is not None:
+            novo_nome = novo_nome.strip()
+
+            if not novo_nome:
+                raise ValueError("O nome não pode ficar vazio.")
+
+            con.execute("""
+                UPDATE grupo
+                SET nome = ?
+                WHERE id = ?
+            """, (novo_nome, grupo_id))
+
+        if nova_cor is not None:
+            con.execute("""
+                UPDATE grupo
+                SET cor = ?
+                WHERE id = ?
+            """, (nova_cor, grupo_id))
+
+
+# ==========================================
+# EXCLUIR GRUPO OU SUBGRUPO
+# ==========================================
+
+def excluir_grupo(grupo_id):
+
+    with conectar() as con:
+
+        grupo = con.execute(
+            "SELECT id FROM grupo WHERE id = ?",
+            (grupo_id,)
+        ).fetchone()
+
+        if grupo is None:
+            raise ValueError("Grupo não encontrado.")
+
+        filhos = con.execute("""
+            SELECT id FROM grupo
+            WHERE grupo_pai_id = ?
+        """, (grupo_id,)).fetchall()
+
+        if filhos:
+            raise ValueError(
+                "Este grupo possui subgrupos. "
+                "Exclua os subgrupos primeiro."
+            )
+
+        con.execute("""
+            DELETE FROM participacao
+            WHERE grupo_id = ?
+        """, (grupo_id,))
+
+        con.execute("""
+            DELETE FROM grupo
+            WHERE id = ?
+        """, (grupo_id,))
+
+
+# ==========================================
+# CADASTRAR PARTICIPANTE
+# ==========================================
+
+def cadastrar_participante(nome):
+
+    nome = nome.strip()
+
+    if not nome:
+        raise ValueError("O nome do participante é obrigatório.")
+
+    with conectar() as con:
+
+        cursor = con.execute("""
+            INSERT INTO participante (nome)
+            VALUES (?)
+        """, (nome,))
+
+        return cursor.lastrowid
+
+
+# ==========================================
+# LISTAR PARTICIPANTES CADASTRADOS
+# ==========================================
 
 def listar_participantes():
-    conexao = conectar()
-    linhas = conexao.execute(
-        "SELECT id, nome FROM participante ORDER BY id"
-    ).fetchall()
-    conexao.close()
-    return linhas
+
+    with conectar() as con:
+
+        participantes = con.execute("""
+            SELECT id, nome
+            FROM participante
+            ORDER BY nome
+        """).fetchall()
+
+        print("\n========== PARTICIPANTES ==========")
+
+        if not participantes:
+            print("Nenhum participante cadastrado.")
+            return
+
+        for pessoa in participantes:
+            print(f"[{pessoa['id']}] {pessoa['nome']}")
 
 
-def mostrar_grupos():
-    print("\nGrupos:")
-    for id_grupo, nome, cor, pai in listar_grupos():
-        if pai is None:
-            print(f"  [{id_grupo}] {nome} (grupo principal)")
-        else:
-            print(f"  [{id_grupo}] {nome} - cor: {cor} (subgrupo do grupo {pai})")
+# ==========================================
+# ADICIONAR PARTICIPANTE AO GRUPO
+# ==========================================
+
+def adicionar_participante(participante_id, grupo_id):
+
+    with conectar() as con:
+
+        pessoa = con.execute(
+            "SELECT id FROM participante WHERE id = ?",
+            (participante_id,)
+        ).fetchone()
+
+        grupo = con.execute(
+            "SELECT id FROM grupo WHERE id = ?",
+            (grupo_id,)
+        ).fetchone()
+
+        if pessoa is None:
+            raise ValueError("Participante não encontrado.")
+
+        if grupo is None:
+            raise ValueError("Grupo não encontrado.")
+
+        existente = con.execute("""
+            SELECT * FROM participacao
+            WHERE participante_id = ? AND grupo_id = ?
+        """, (participante_id, grupo_id)).fetchone()
+
+        if existente:
+            raise ValueError("Esta pessoa já participa desse grupo.")
+
+        con.execute("""
+            INSERT INTO participacao
+            (participante_id, grupo_id)
+            VALUES (?, ?)
+        """, (participante_id, grupo_id))
 
 
-def mostrar_participantes():
-    print("\nParticipantes:")
-    for id_participante, nome in listar_participantes():
-        print(f"  [{id_participante}] {nome}")
+# ==========================================
+# REMOVER PARTICIPANTE DO GRUPO
+# ==========================================
+
+def remover_participante(participante_id, grupo_id):
+
+    with conectar() as con:
+
+        cursor = con.execute("""
+            DELETE FROM participacao
+            WHERE participante_id = ?
+            AND grupo_id = ?
+        """, (participante_id, grupo_id))
+
+        if cursor.rowcount == 0:
+            raise ValueError(
+                "Participação não encontrada."
+            )
 
 
-def ler_numero(texto):
-    while True:
-        try:
-            return int(input(texto))
-        except ValueError:
-            print("Digite apenas números.")
+# ==========================================
+# LISTAR PARTICIPANTES DE UM GRUPO
+# ==========================================
 
+def listar_integrantes(grupo_id):
+
+    with conectar() as con:
+
+        grupo = con.execute("""
+            SELECT nome FROM grupo
+            WHERE id = ?
+        """, (grupo_id,)).fetchone()
+
+        if grupo is None:
+            raise ValueError("Grupo não encontrado.")
+
+        pessoas = con.execute("""
+            SELECT participante.id, participante.nome
+            FROM participante
+            INNER JOIN participacao
+            ON participante.id = participacao.participante_id
+            WHERE participacao.grupo_id = ?
+            ORDER BY participante.nome
+        """, (grupo_id,)).fetchall()
+
+        print(f"\n========== {grupo['nome']} ==========")
+
+        if not pessoas:
+            print("Nenhum participante neste grupo.")
+            return
+
+        for pessoa in pessoas:
+            print(
+                f"[{pessoa['id']}] {pessoa['nome']}"
+            )
+
+
+# ==========================================
+# MENU PRINCIPAL
+# ==========================================
 
 def menu():
+
     while True:
-        print("\n=== GERENCIADOR DE GRUPOS ===")
+
+        print("\n" + "=" * 42)
+        print("       SISTEMA DE GERENCIAMENTO")
+        print("             DE GRUPOS")
+        print("=" * 42)
+
         print("1 - Criar grupo principal")
         print("2 - Criar subgrupo")
-        print("3 - Cadastrar participante")
-        print("4 - Entrar em um grupo")
-        print("5 - Sair de um grupo")
-        print("6 - Sair de tudo")
-        print("7 - Excluir subgrupo")
-        print("8 - Ver membros de um grupo")
-        print("9 - Ver projetos de um participante")
-        print("0 - Encerrar")
-        opcao = input("Escolha: ")
+        print("3 - Listar grupos e subgrupos")
+        print("4 - Editar grupo")
+        print("5 - Excluir grupo ou subgrupo")
+        print("6 - Cadastrar participante")
+        print("7 - Adicionar participante ao grupo")
+        print("8 - Remover participante do grupo")
+        print("9 - Listar participantes cadastrados")
+        print("10 - Ver integrantes de um grupo")
+        print("0 - Sair")
+
+        opcao = input("\nEscolha uma opção: ").strip()
 
         try:
+
             if opcao == "1":
-                nome = input("Nome do grupo principal: ")
-                novo_id = criar_grupo_principal(nome)
-                print("Grupo criado com id", novo_id)
+
+                nome = input("Nome do grupo: ")
+                cor = input("Cor do grupo: ").strip() or None
+
+                grupo_id = criar_grupo(nome, cor)
+
+                print(
+                    f"\nGrupo criado com sucesso! ID: {grupo_id}"
+                )
 
             elif opcao == "2":
-                mostrar_grupos()
+
+                listar_grupos()
+
+                pai = int(input("\nID do grupo principal: "))
                 nome = input("Nome do subgrupo: ")
-                cor = input("Cor do subgrupo: ")
-                pai = ler_numero("Id do grupo principal: ")
-                novo_id = criar_subgrupo(nome, cor, pai)
-                print("Subgrupo criado com id", novo_id)
+                cor = input("Cor do subgrupo: ").strip() or None
+
+                grupo_id = criar_grupo(nome, cor, pai)
+
+                print(
+                    f"\nSubgrupo criado com sucesso! ID: {grupo_id}"
+                )
 
             elif opcao == "3":
-                nome = input("Nome do participante: ")
-                novo_id = criar_participante(nome)
-                print("Participante cadastrado com id", novo_id)
+
+                listar_grupos()
 
             elif opcao == "4":
-                mostrar_participantes()
-                mostrar_grupos()
-                pessoa = ler_numero("Id do participante: ")
-                grupo = ler_numero("Id do grupo: ")
-                if entrar_no_grupo(pessoa, grupo):
-                    print("Entrou no grupo!")
+
+                listar_grupos()
+
+                grupo_id = int(input("\nID do grupo para editar: "))
+
+                nome = input(
+                    "Novo nome (Enter para manter): "
+                ).strip()
+
+                cor = input(
+                    "Nova cor (Enter para manter): "
+                ).strip()
+
+                editar_grupo(
+                    grupo_id,
+                    novo_nome=nome if nome else None,
+                    nova_cor=cor if cor else None
+                )
+
+                print("\nGrupo atualizado com sucesso!")
 
             elif opcao == "5":
-                mostrar_participantes()
-                mostrar_grupos()
-                pessoa = ler_numero("Id do participante: ")
-                grupo = ler_numero("Id do grupo: ")
-                if sair_do_subgrupo(pessoa, grupo):
-                    print("Saiu do grupo!")
+
+                listar_grupos()
+
+                grupo_id = int(input("\nID do grupo para excluir: "))
+
+                confirmar = input(
+                    "Tem certeza que deseja excluir? (s/n): "
+                ).lower()
+
+                if confirmar == "s":
+                    excluir_grupo(grupo_id)
+                    print("\nGrupo excluído com sucesso!")
                 else:
-                    print("Essa pessoa não estava nesse grupo.")
+                    print("\nOperação cancelada.")
 
             elif opcao == "6":
-                mostrar_participantes()
-                pessoa = ler_numero("Id do participante: ")
-                total = sair_de_tudo(pessoa)
-                print(f"Saiu de {total} grupo(s).")
+
+                nome = input("Nome do participante: ")
+
+                pessoa_id = cadastrar_participante(nome)
+
+                print(
+                    f"\nParticipante cadastrado! ID: {pessoa_id}"
+                )
 
             elif opcao == "7":
-                mostrar_grupos()
-                grupo = ler_numero("Id do subgrupo a excluir: ")
-                excluir_subgrupo(grupo)
-                print("Subgrupo excluído.")
+
+                listar_participantes()
+                listar_grupos()
+
+                pessoa_id = int(
+                    input("\nID do participante: ")
+                )
+
+                grupo_id = int(
+                    input("ID do grupo: ")
+                )
+
+                adicionar_participante(
+                    pessoa_id,
+                    grupo_id
+                )
+
+                print("\nParticipante adicionado com sucesso!")
 
             elif opcao == "8":
-                mostrar_grupos()
-                grupo = ler_numero("Id do grupo: ")
-                print("Membros:", listar_membros(grupo))
+
+                listar_grupos()
+
+                grupo_id = int(input("\nID do grupo: "))
+
+                listar_integrantes(grupo_id)
+
+                pessoa_id = int(
+                    input("\nID do participante para remover: ")
+                )
+
+                remover_participante(
+                    pessoa_id,
+                    grupo_id
+                )
+
+                print("\nParticipante removido do grupo!")
 
             elif opcao == "9":
-                mostrar_participantes()
-                pessoa = ler_numero("Id do participante: ")
-                print("Projetos:", listar_projetos_do_participante(pessoa))
+
+                listar_participantes()
+
+            elif opcao == "10":
+
+                listar_grupos()
+
+                grupo_id = int(
+                    input("\nID do grupo: ")
+                )
+
+                listar_integrantes(grupo_id)
 
             elif opcao == "0":
-                print("Encerrando...")
+
+                print("\nPrograma encerrado. Até mais!")
                 break
 
             else:
-                print("Opção inválida.")
 
-        except sqlite3.IntegrityError:
-            print("Erro: confira se os ids digitados existem.")
+                print("\nOpção inválida. Tente novamente.")
 
+        except ValueError as erro:
+
+            print(f"\nErro: {erro}")
+
+        except sqlite3.IntegrityError as erro:
+
+            print(f"\nErro no banco de dados: {erro}")
+
+        except sqlite3.Error as erro:
+
+            print(f"\nErro no SQLite: {erro}")
+
+        except Exception as erro:
+
+            print(f"\nOcorreu um erro: {erro}")
+
+
+# ==========================================
+# EXECUCAO DO PROGRAMA
+# ==========================================
 
 if __name__ == "__main__":
-    menu()
 
+    iniciar_banco()
+
+    print("\nBanco de dados conectado com sucesso!")
+
+    menu()
