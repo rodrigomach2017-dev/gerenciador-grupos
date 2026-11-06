@@ -1,51 +1,140 @@
+import os
+import sqlite3
 import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox
 
 PRINCIPAL = "ADS — Faculdade"
 CORES = ["#1e6fd9", "#2e9e4f", "#f08a1c", "#8e44ad", "#d62d2d", "#16a0a0"]
 
-# ==== DADOS PROVISÓRIOS ENQUANTO NÃO INTEGRAMOS AO BANCO DE DADOS ====
-
 pessoas = {}                    # nome -> conjunto de projetos
 projetos = {}                   # nome do projeto -> cor
-mensagens = {PRINCIPAL: []}     # grupo -> lista__grupos de (autor, texto)
+mensagens = {PRINCIPAL: []}     # grupo -> lista de (autor, texto)
 
+conexao = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'grupos.db'))
+conexao.execute("PRAGMA foreign_keys = on")
+
+conexao.execute("""
+CREATE TABLE IF NOT EXISTS mensagem (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    grupo_id INTEGER NOT NULL,
+    autor TEXT NOT NULL,
+    texto TEXT NOT NULL,
+    FOREIGN KEY (grupo_id) REFERENCES grupo(id)
+)
+""")
+conexao.commit()
+
+def _criar_principal():
+    # o grupo principal é o grupo sem grupo_pai; os projetos são filhos dele
+    linha = conexao.execute(
+        "SELECT id FROM grupo WHERE nome = ? AND grupo_pai_id IS NULL", (PRINCIPAL,)).fetchone()
+    if linha:
+        return linha[0]
+    cursor = conexao.execute("INSERT INTO grupo (nome, cor, grupo_pai_id) VALUES (?, NULL, NULL)", (PRINCIPAL,))
+    conexao.commit()
+    return cursor.lastrowid
+ 
+ 
+ID_PRINCIPAL = _criar_principal()
+ 
+ 
+def _id_pessoa(nome):
+    return conexao.execute("SELECT id FROM participante WHERE nome = ?", (nome,)).fetchone()[0]
+ 
+ 
+def _id_grupo(nome):
+    if nome == PRINCIPAL:
+        return ID_PRINCIPAL
+    return conexao.execute(
+        "SELECT id FROM grupo WHERE nome = ? AND grupo_pai_id = ?", (nome, ID_PRINCIPAL)).fetchone()[0]
+ 
+ 
+def recarregar():
+    """Lê o banco e refaz os dicionários usados pela interface."""
+    pessoas.clear()
+    projetos.clear()
+    mensagens.clear()
+    mensagens[PRINCIPAL] = []
+    for (nome,) in conexao.execute("SELECT nome FROM participante ORDER BY id"):
+        pessoas[nome] = set()
+    for nome, cor in conexao.execute(
+            "SELECT nome, cor FROM grupo WHERE grupo_pai_id = ? ORDER BY id", (ID_PRINCIPAL,)):
+        projetos[nome] = cor
+        mensagens[nome] = []
+    for pessoa, projeto in conexao.execute("""
+            SELECT pt.nome, g.nome FROM participacao pa
+            JOIN participante pt ON pt.id = pa.participante_id
+            JOIN grupo g ON g.id = pa.grupo_id
+            WHERE g.grupo_pai_id = ?""", (ID_PRINCIPAL,)):
+        pessoas[pessoa].add(projeto)
+    for grupo, autor, texto in conexao.execute("""
+            SELECT g.nome, m.autor, m.texto FROM mensagem m
+            JOIN grupo g ON g.id = m.grupo_id ORDER BY m.id"""):
+        if grupo in mensagens:
+            mensagens[grupo].append((autor, texto))
+ 
+ 
 def nova_pessoa(nome):
     if nome in pessoas:
         return "Essa pessoa já existe."
-    pessoas[nome] = set()
-
-
+    conexao.execute("INSERT INTO participante (nome) VALUES (?)", (nome,))
+    conexao.commit()
+    recarregar()
+ 
+ 
 def novo_projeto(nome):
     if nome in projetos or nome == PRINCIPAL:
         return "Esse projeto já existe."
-    projetos[nome] = CORES[len(projetos) % len(CORES)]
-    mensagens[nome] = []
-
-
+    cor = CORES[len(projetos) % len(CORES)]
+    conexao.execute("INSERT INTO grupo (nome, cor, grupo_pai_id) VALUES (?, ?, ?)", (nome, cor, ID_PRINCIPAL))
+    conexao.commit()
+    recarregar()
+ 
+ 
 def entrar_no_projeto(pessoa, projeto):
-    pessoas[pessoa].add(projeto)
-
-
+    conexao.execute("INSERT OR IGNORE INTO participacao (participante_id, grupo_id) VALUES (?, ?)",
+                    (_id_pessoa(pessoa), _id_grupo(projeto)))
+    conexao.commit()
+    recarregar()
+ 
+ 
 def sair_do_projeto(pessoa, projeto):
-    pessoas[pessoa].discard(projeto)
-
-
+    conexao.execute("DELETE FROM participacao WHERE participante_id = ? AND grupo_id = ?",
+                    (_id_pessoa(pessoa), _id_grupo(projeto)))
+    conexao.commit()
+    recarregar()
+ 
+ 
 def sair_de_tudo(pessoa):
-    pessoas.pop(pessoa, None)
-
-
+    pid = _id_pessoa(pessoa)
+    conexao.execute("DELETE FROM participacao WHERE participante_id = ?", (pid,))
+    conexao.execute("DELETE FROM participante WHERE id = ?", (pid,))
+    conexao.commit()
+    recarregar()
+ 
+ 
 def excluir_projeto(projeto):
-    projetos.pop(projeto, None)
-    mensagens.pop(projeto, None)
-    for p in pessoas.values():
-        p.discard(projeto)
-
-
+    gid = _id_grupo(projeto)
+    conexao.execute("DELETE FROM participacao WHERE grupo_id = ?", (gid,))
+    conexao.execute("DELETE FROM mensagem WHERE grupo_id = ?", (gid,))
+    conexao.execute("DELETE FROM grupo WHERE id = ?", (gid,))
+    conexao.commit()
+    recarregar()
+ 
+ 
+def nova_mensagem(grupo, autor, texto):
+    conexao.execute("INSERT INTO mensagem (grupo_id, autor, texto) VALUES (?, ?, ?)",
+                    (_id_grupo(grupo), autor, texto))
+    conexao.commit()
+    recarregar()
+ 
+ 
 def membros(grupo):
     if grupo == PRINCIPAL:
         return list(pessoas)
     return [p for p, ps in pessoas.items() if grupo in ps]
+
+recarregar()
 
 
 # ==== INTERFACE ====
@@ -66,7 +155,7 @@ combo.pack(side="left", padx=4)
 corpo = tk.Frame(janela)
 corpo.pack(fill="both", expand=True, padx=8)
 
-#Lista_lista__grupos de Grupos (Esquerda)
+#Lista de Grupos (Esquerda)
 esquerda = tk.Frame(corpo)
 esquerda.pack(side="left", fill="y")
 tk.Label(esquerda, text="Grupos").pack()
@@ -99,7 +188,7 @@ for t in (chat, membros_txt):
 
 
 def escrever(widget, linhas):
-    #linhas = lista__grupos de (lista__grupos_de_cores, texto)
+    #linhas = lista de (lista_de_cores, texto)
     widget.config(state="normal")
     widget.delete(1.0, "end")
     for cores, texto in linhas:
@@ -206,7 +295,7 @@ def acao_enviar(_=None):
     if p not in membros(grupo_atual):
         messagebox.showinfo("Aviso", f"{p} não participa de '{grupo_atual}'.")
         return
-    mensagens[grupo_atual].append((p, texto))
+    nova_mensagem(grupo_atual, p, texto)
     campo.delete(0, "end")
     atualizar()
 
